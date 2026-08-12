@@ -76,7 +76,10 @@ set_source_files_properties(
 
 # Install visualizer python scripts
 ament_python_install_package(${PROJECT_NAME})
-install(PROGRAMS scripts/isaac_ros_fast_foundationstereo_visualizer.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS
+  scripts/isaac_ros_fast_foundationstereo_visualizer.py
+  scripts/benchmark_fast_foundationstereo.py
+  DESTINATION lib/${PROJECT_NAME})
 
 # Embed versioning information into installed files
 ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path isaac_ros_common)
