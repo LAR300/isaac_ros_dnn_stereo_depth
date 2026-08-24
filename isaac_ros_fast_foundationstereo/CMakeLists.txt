@@ -79,6 +79,8 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/isaac_ros_fast_foundationstereo_visualizer.py
   scripts/benchmark_fast_foundationstereo.py
+  scripts/build_ffs_engine.sh
+  scripts/sanity_check_ffs_engine.py
   DESTINATION lib/${PROJECT_NAME})
 
 # Embed versioning information into installed files
