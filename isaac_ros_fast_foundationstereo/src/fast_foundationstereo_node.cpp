@@ -17,6 +17,7 @@
 
 #include "isaac_ros_fast_foundationstereo/fast_foundationstereo_node.hpp"
 
+#include <chrono>
 #include <fstream>
 #include <functional>
 
@@ -50,6 +51,8 @@ FastFoundationStereoNode::FastFoundationStereoNode(const rclcpp::NodeOptions & o
   model_input_width_ = declare_parameter<int>("model_input_width", 736);
 
   const auto queue_size = declare_parameter<int>("queue_size", 10);
+  enable_timing_ = declare_parameter<bool>("enable_timing", false);
+  timing_report_every_ = declare_parameter<int>("timing_report_every", 50);
 
   // CUDA stream
   auto err = cudaStreamCreate(&stream_);
@@ -275,11 +278,24 @@ void FastFoundationStereoNode::stereoCallback(
     return;
   }
 
+  // Phase timing. The node delivers 7.80 Hz on an Orin against an engine
+  // measured at 111.2 ms in isolation, so ~17 ms per frame is spent somewhere
+  // in here. Guessing which part has already been wrong three times in this
+  // investigation, so measure it. Off by default; `enable_timing:=true`.
+  const auto t_start = std::chrono::steady_clock::now();
+  auto stamp = [](const std::chrono::steady_clock::time_point & from) {
+      return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - from).count();
+    };
+
   // Run inference
   if (!context_->enqueueV3(stream_)) {
     RCLCPP_ERROR(get_logger(), "TensorRT inference failed");
     return;
   }
+
+  const double ms_enqueue = stamp(t_start);
+  const auto t_filter = std::chrono::steady_clock::now();
 
   // Filter disparity on GPU
   int height = model_input_height_;
@@ -290,7 +306,28 @@ void FastFoundationStereoNode::stereoCallback(
     static_cast<float>(min_disparity_), static_cast<float>(max_disparity_),
     stream_);
 
-  // Copy result to host
+  const double ms_filter = stamp(t_filter);
+
+  // enqueueV3 is ASYNCHRONOUS: it returns before the GPU is done. A single
+  // timer around "copy + sync" therefore charges the copy for the remaining
+  // inference time, which would point the optimisation at the wrong place.
+  // When timing, drain the stream first so the two are separable. This adds a
+  // sync that the normal path does not have, which is why it is conditional.
+  double ms_inference_wait = 0.0;
+  if (enable_timing_) {
+    const auto t_wait = std::chrono::steady_clock::now();
+    cudaStreamSynchronize(stream_);
+    ms_inference_wait = stamp(t_wait);
+  }
+
+  const auto t_copy = std::chrono::steady_clock::now();
+
+  // Copy result to host.
+  //
+  // Two costs hide here, both per frame. The vector is allocated AND
+  // value-initialised, so 590 KB is memset to zero before being immediately
+  // overwritten. And it is pageable memory, so the D2H cannot DMA directly:
+  // the driver stages it through an internal pinned buffer.
   std::vector<uint8_t> host_data(output_size_);
   auto err = cudaMemcpyAsync(
     host_data.data(), d_output_, output_size_, cudaMemcpyDeviceToHost, stream_);
@@ -299,6 +336,9 @@ void FastFoundationStereoNode::stereoCallback(
     return;
   }
   cudaStreamSynchronize(stream_);
+
+  const double ms_copy = stamp(t_copy);
+  const auto t_publish = std::chrono::steady_clock::now();
 
   // Build DisparityImage
   stereo_msgs::msg::DisparityImage disp_msg;
@@ -324,6 +364,29 @@ void FastFoundationStereoNode::stereoCallback(
   disp_msg.delta_d = 1.0f / 16.0f;
 
   disparity_pub_->publish(disp_msg);
+
+  if (enable_timing_) {
+    timing_n_++;
+    timing_enqueue_ += ms_enqueue;
+    timing_filter_ += ms_filter;
+    timing_copy_ += ms_copy;
+    timing_wait_ += ms_inference_wait;
+    timing_publish_ += stamp(t_publish);
+    if (timing_n_ >= timing_report_every_) {
+      const double n = static_cast<double>(timing_n_);
+      RCLCPP_INFO(
+        get_logger(),
+        "timing over %d frames (ms): enqueue %.2f | filter %.2f | "
+        "inference-wait %.2f | D2H+sync %.2f | build+publish %.2f | total %.2f",
+        timing_n_, timing_enqueue_ / n, timing_filter_ / n,
+        timing_wait_ / n, timing_copy_ / n, timing_publish_ / n,
+        (timing_enqueue_ + timing_filter_ + timing_wait_ + timing_copy_ +
+        timing_publish_) / n);
+      timing_n_ = 0;
+      timing_enqueue_ = timing_filter_ = timing_copy_ = timing_publish_ = 0.0;
+      timing_wait_ = 0.0;
+    }
+  }
 
   RCLCPP_DEBUG(get_logger(), "Published disparity %dx%d", width, height);
 }

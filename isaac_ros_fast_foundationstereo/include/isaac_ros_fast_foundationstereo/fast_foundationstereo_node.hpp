@@ -123,6 +123,16 @@ private:
   int model_input_height_;
   int model_input_width_;
 
+  // Phase timing (enable_timing parameter).
+  bool enable_timing_{false};
+  int timing_report_every_{50};
+  int timing_n_{0};
+  double timing_enqueue_{0.0};
+  double timing_filter_{0.0};
+  double timing_copy_{0.0};
+  double timing_wait_{0.0};
+  double timing_publish_{0.0};
+
   // NITROS subscribers for stereo tensors
   nvidia::isaac_ros::nitros::message_filters::Subscriber<NitrosTensorListView> left_sub_;
   nvidia::isaac_ros::nitros::message_filters::Subscriber<NitrosTensorListView> right_sub_;
